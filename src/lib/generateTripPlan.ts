@@ -180,9 +180,9 @@ export async function generateTripPlan(formData: TripFormData): Promise<Itinerar
     if (rd.lat && rd.lon) {
       try {
         const [apiAttr, apiFood, apiPhoto, weather] = await Promise.all([
-          fetchPlaces(rd.lat, rd.lon, 'attractions', 8),
-          fetchPlaces(rd.lat, rd.lon, 'food', 8),
-          fetchPlaces(rd.lat, rd.lon, 'photo', 5),
+          fetchPlaces(rd.lat, rd.lon, 'attractions', 10, rd.name),
+          fetchPlaces(rd.lat, rd.lon, 'food', 10, rd.name),
+          fetchPlaces(rd.lat, rd.lon, 'photo', 6, rd.name),
           fetchWeather(rd.lat, rd.lon),
         ]);
 

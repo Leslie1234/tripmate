@@ -3,38 +3,38 @@ import type { Attraction, Food, PhotoSpot } from '@/types';
 interface PlaceResult {
   id: string;
   name: string;
-  nameOriginal?: string;
   address: string;
-  categories: string[];
-  website?: string;
-  openingHours?: string;
+  latitude?: number;
+  longitude?: number;
+  rating?: number;
+  types?: string[];
+  source: string;
+  cost?: string;
+  photo?: string;
 }
 
-interface DestinationDetailResult {
-  wikiDescription: string | null;
-  apiAttractions: PlaceResult[];
-  apiRestaurants: PlaceResult[];
-  apiViewpoints: PlaceResult[];
-  apiClimate: { month: number; temp: number; precip: number }[] | null;
-}
-
-export async function fetchDestinationDetail(id: string): Promise<DestinationDetailResult | null> {
+export async function searchDestinations(query: string): Promise<{ name: string; country: string; lat: number; lon: number }[]> {
   try {
-    const res = await fetch(`/api/destinations/${id}`, { signal: AbortSignal.timeout(10000) });
-    if (!res.ok) return null;
-    const json = await res.json();
-    return json.data || null;
+    const res = await fetch(`/api/destinations?q=${encodeURIComponent(query)}`);
+    if (!res.ok) return [];
+    const data = await res.json();
+    return (data.results || []).map((r: { name: string; country: string; lat: number; lon: number }) => ({
+      name: r.name,
+      country: r.country,
+      lat: r.lat,
+      lon: r.lon,
+    }));
   } catch {
-    return null;
+    return [];
   }
 }
 
-export async function fetchPlaces(lat: number, lon: number, category: string, limit = 10): Promise<PlaceResult[]> {
+export async function fetchPlaces(lat: number, lon: number, category: string, limit = 15, destination = ''): Promise<PlaceResult[]> {
   try {
-    const res = await fetch(`/api/places?lat=${lat}&lon=${lon}&category=${category}&limit=${limit}`);
+    const res = await fetch(`/api/places?lat=${lat}&lng=${lon}&type=${category}&limit=${limit}&destination=${encodeURIComponent(destination)}`);
     if (!res.ok) return [];
-    const json = await res.json();
-    return json.places || [];
+    const data = await res.json();
+    return data.places || [];
   } catch {
     return [];
   }
@@ -44,21 +44,10 @@ export async function fetchWeather(lat: number, lon: number) {
   try {
     const res = await fetch(`/api/weather?lat=${lat}&lon=${lon}`);
     if (!res.ok) return null;
-    const json = await res.json();
-    return json.months || null;
+    const data = await res.json();
+    return data.months || data;
   } catch {
     return null;
-  }
-}
-
-export async function searchDestinations(query: string) {
-  try {
-    const res = await fetch(`/api/destinations?q=${encodeURIComponent(query)}`);
-    if (!res.ok) return [];
-    const json = await res.json();
-    return json.results || [];
-  } catch {
-    return [];
   }
 }
 
@@ -67,13 +56,13 @@ export function apiPlacesToAttractions(places: PlaceResult[], destinationId: str
     id: p.id || `api-attr-${i}`,
     name: p.name,
     destinationId,
-    rating: 4,
+    rating: p.rating || 4,
     duration: '1-2小时',
     bestTime: '全天',
     suitableFor: ['所有人'],
     needReservation: false,
     photoFriendly: true,
-    tips: p.address || '',
+    tips: p.address || `来源: ${p.source}`,
   }));
 }
 
@@ -83,9 +72,9 @@ export function apiPlacesToFoods(places: PlaceResult[], destinationId: string): 
     name: p.name,
     destinationId,
     cuisine: '当地特色',
-    priceRange: '¥50-200',
+    priceRange: p.cost ? `¥${p.cost}` : '¥50-200',
     bestFor: '午餐',
-    reason: p.address || '',
+    reason: p.address || `来源: ${p.source}`,
     nearbyAttractions: [],
   }));
 }
@@ -95,11 +84,11 @@ export function apiPlacesToPhotoSpots(places: PlaceResult[], destinationId: stri
     id: p.id || `api-photo-${i}`,
     name: p.name,
     destinationId,
-    target: p.nameOriginal || p.name,
+    target: p.name,
     bestTime: '日落时分',
     style: '风景',
     crowdLevel: '适中',
     nearbyAttractions: [],
-    tips: p.address || '',
+    tips: p.address || `来源: ${p.source}`,
   }));
 }
