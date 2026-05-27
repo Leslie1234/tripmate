@@ -6,6 +6,7 @@ export interface Destination {
   description: string;
   gradient: string;
   emoji: string;
+  imageUrl: string;
   score: number;
   bestSeasons: string[];
   budgetRange: string;

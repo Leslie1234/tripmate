@@ -43,15 +43,21 @@ function PlannerContent() {
   return (
     <>
       <div className="max-w-7xl mx-auto px-4 py-8">
-        <div className="text-center mb-8">
-          <h1 className="text-2xl md:text-3xl font-bold text-gray-900 mb-2">生成你的旅行攻略</h1>
-          <p className="text-muted-foreground">填写你的旅行偏好，我们为你量身定制完美行程</p>
+        {/* Title Section */}
+        <div className="text-center mb-10 animate-fade-in">
+          <h1 className="heading-page text-gray-900 mb-2">
+            <span className="gradient-text">生成你的旅行攻略</span>
+          </h1>
+          <p className="body-text max-w-lg mx-auto">
+            填写你的旅行偏好，AI 为你量身定制完美行程
+          </p>
         </div>
 
+        {/* Main Layout */}
         <div className="flex flex-col lg:flex-row gap-8">
-          <div className="lg:w-[420px] shrink-0">
+          {/* Left: Form */}
+          <div className="lg:w-[440px] shrink-0">
             <div className="card sticky top-20">
-              <h2 className="font-semibold text-gray-900 mb-4">📋 旅行偏好</h2>
               <TripForm
                 onGenerate={handleGenerate}
                 loading={loading}
@@ -60,6 +66,7 @@ function PlannerContent() {
             </div>
           </div>
 
+          {/* Right: Preview */}
           <div className="flex-1 min-w-0">
             <div className="card">
               <ItineraryPreview
