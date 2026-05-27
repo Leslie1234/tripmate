@@ -1,20 +1,34 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getCached, setCache } from '@/lib/api-cache';
 
+const AMAP_KEY = process.env.AMAP_API_KEY;
 const GEOAPIFY_KEY = process.env.GEOAPIFY_API_KEY;
 
-const CATEGORY_MAP: Record<string, string> = {
+const AMAP_TYPE_MAP: Record<string, string> = {
+  attractions: '110000|110100|110200|110201|110202|110203|110204|110205|110206|110207|110208|110209|110210',
+  food: '050000|050100|050200|050300|050400|050500|050600|050700|050800|050900',
+  photo: '110000|110100|110200|110300|110301|110302|110303',
+};
+
+const GEOAPIFY_CATEGORY_MAP: Record<string, string> = {
   attractions: 'tourism.sights,tourism.attraction,entertainment.museum,entertainment.culture',
   food: 'catering.restaurant,catering.cafe,catering.fast_food',
   photo: 'tourism.attraction.viewpoint,natural,tourism.sights.tower',
 };
 
-interface WikiGeoResult {
-  pageid: number;
-  title: string;
-  lat: number;
-  lon: number;
-  dist: number;
+interface AmapPoi {
+  name: string;
+  address: string;
+  location: string;
+  type: string;
+  typecode: string;
+  id: string;
+  tel?: string;
+  rating?: string;
+  cityname?: string;
+  adname?: string;
+  photos?: Array<{ url: string }>;
+  biz_ext?: { rating?: string; cost?: string };
 }
 
 interface GeoapifyFeature {
@@ -23,66 +37,117 @@ interface GeoapifyFeature {
     categories?: string[];
     formatted?: string;
     place_id?: string;
-    website?: string;
-    opening_hours?: string;
-    distance?: number;
+    lat?: number;
+    lon?: number;
   };
 }
 
-async function fetchWikipediaPlaces(lat: string, lon: string, limit: number) {
+async function fetchAmapPlaces(keyword: string, city: string, type: string, limit: number) {
+  if (!AMAP_KEY) return [];
   try {
-    // Step 1: Get nearby places from English Wikipedia (zh.wikipedia blocked in some regions)
-    const geoUrl = `https://en.wikipedia.org/w/api.php?action=query&list=geosearch&gscoord=${lat}|${lon}&gsradius=10000&gslimit=${limit}&format=json`;
-    const geoRes = await fetch(geoUrl, {
-      signal: AbortSignal.timeout(5000),
-      headers: { 'User-Agent': 'TripMateApp/1.0 (tripmate@example.com)' },
-    });
-    if (!geoRes.ok) return [];
-    const geoData = await geoRes.json();
-    const places: WikiGeoResult[] = geoData.query?.geosearch || [];
-    if (places.length === 0) return [];
+    const types = AMAP_TYPE_MAP[type] || AMAP_TYPE_MAP.attractions;
+    const url = `https://restapi.amap.com/v3/place/text?key=${AMAP_KEY}&keywords=${encodeURIComponent(keyword)}&city=${encodeURIComponent(city)}&types=${types}&offset=${limit}&page=1&extensions=all`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(5000) });
+    if (!res.ok) return [];
+    const data = await res.json();
+    if (data.status !== '1' || !data.pois) return [];
 
-    // Step 2: Batch get Chinese translations via langlinks
-    const titles = encodeURIComponent(places.map(r => r.title).join('|'));
-    const langUrl = `https://en.wikipedia.org/w/api.php?action=query&titles=${titles}&prop=langlinks&lllang=zh&format=json&lllimit=50`;
-    const langRes = await fetch(langUrl, {
-      signal: AbortSignal.timeout(5000),
-      headers: { 'User-Agent': 'TripMateApp/1.0 (tripmate@example.com)' },
-    });
+    return data.pois
+      .filter((p: AmapPoi) => p.name && p.location)
+      .map((p: AmapPoi) => {
+        const [lng, lat] = p.location.split(',').map(Number);
+        const rating = p.biz_ext?.rating ? parseFloat(p.biz_ext.rating) : (p.rating ? parseFloat(p.rating) : undefined);
+        return {
+          id: `amap-${p.id}`,
+          name: p.name,
+          address: typeof p.address === 'string' ? p.address : (p.cityname || '') + (p.adname || ''),
+          latitude: lat,
+          longitude: lng,
+          rating: rating && rating > 0 ? rating : undefined,
+          types: [p.type],
+          source: 'amap',
+          photo: p.photos?.[0]?.url,
+          cost: p.biz_ext?.cost,
+        };
+      });
+  } catch {
+    return [];
+  }
+}
 
-    const zhNames: Record<string, string> = {};
-    if (langRes.ok) {
-      const langData = await langRes.json();
-      const pages = Object.values(langData.query?.pages || {}) as Array<{ title?: string; langlinks?: Array<{ '*': string }> }>;
-      for (const page of pages) {
-        if (page.title && page.langlinks && page.langlinks.length > 0) {
-          zhNames[page.title] = page.langlinks[0]['*'];
+async function fetchWikipediaPlaces(lat: number, lng: number, limit: number) {
+  try {
+    const offsets = [[0, 0], [0.015, 0.015], [-0.015, 0.015], [0.015, -0.015], [-0.015, -0.015]];
+    const allPlaces: Array<{ pageid: number; title: string; lat: number; lon: number; dist: number }> = [];
+    const seenIds = new Set<number>();
+
+    const fetches = offsets.map(async ([dlat, dlng]) => {
+      try {
+        const url = `https://en.wikipedia.org/w/api.php?action=query&list=geosearch&gscoord=${lat + dlat}|${lng + dlng}&gsradius=5000&gslimit=20&format=json`;
+        const res = await fetch(url, { signal: AbortSignal.timeout(5000), headers: { 'User-Agent': 'TripMateApp/1.0 (tripmate@example.com)' } });
+        if (!res.ok) return;
+        const data = await res.json();
+        for (const p of data.query?.geosearch || []) {
+          if (!seenIds.has(p.pageid)) { seenIds.add(p.pageid); allPlaces.push(p); }
         }
-      }
+      } catch { /* skip */ }
+    });
+    await Promise.all(fetches);
+    if (allPlaces.length === 0) return [];
+
+    const excludeKeywords = /^\d{4}[\s_]|^Timeline|^History of|^List of|episode|battle of|siege of|massacre|commune|revolution|treaty|election|metro|métro|subway/i;
+    const placeKeywords = /tower|museum|cathedral|church|palace|castle|bridge|garden|park|square|plaza|monument|temple|basilica|gallery|opera|theatre|fountain|gate|arch|zoo|stadium/i;
+
+    // Get Chinese translations
+    const zhNames: Record<string, string> = {};
+    const batchSize = 50;
+    for (let i = 0; i < allPlaces.length; i += batchSize) {
+      const batch = allPlaces.slice(i, i + batchSize);
+      const titles = encodeURIComponent(batch.map(r => r.title).join('|'));
+      try {
+        const langRes = await fetch(`https://en.wikipedia.org/w/api.php?action=query&titles=${titles}&prop=langlinks&lllang=zh&format=json&lllimit=50`, {
+          signal: AbortSignal.timeout(5000), headers: { 'User-Agent': 'TripMateApp/1.0 (tripmate@example.com)' },
+        });
+        if (langRes.ok) {
+          const langData = await langRes.json();
+          for (const page of Object.values(langData.query?.pages || {}) as Array<{ title?: string; langlinks?: Array<{ '*': string }> }>) {
+            if (page.title && page.langlinks?.[0]) zhNames[page.title] = page.langlinks[0]['*'];
+          }
+        }
+      } catch { /* skip */ }
     }
 
-    return places
-      .filter((r) => {
-        // Filter out non-tourist entries (sports events, years, stations)
-        if (/^\d{4}\s/.test(r.title)) return false;
-        if (/railway station|bus stop/i.test(r.title) && !/main|central|hauptbahnhof/i.test(r.title)) return false;
+    return allPlaces
+      .filter(r => !excludeKeywords.test(r.title))
+      .filter(r => {
+        const zh = zhNames[r.title] || '';
+        if (/站[)）\s]/.test(zh) && !/火车站|总站|火車站|總站/.test(zh)) return false;
+        if (/地鐵|地铁/.test(zh)) return false;
         return true;
       })
-      .map((r) => ({
+      .map(r => ({ ...r, score: (zhNames[r.title] ? 3 : 0) + (placeKeywords.test(r.title) ? 2 : 0) + (r.title.length < 40 ? 1 : 0) }))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, limit)
+      .map(r => ({
         id: `wiki-${r.pageid}`,
         name: zhNames[r.title] || r.title,
-        address: `距中心 ${(r.dist / 1000).toFixed(1)}km`,
-        categories: ['wikipedia'],
+        address: `距中心 ${(r.dist / 1000).toFixed(1)}km · 维基百科`,
+        latitude: r.lat,
+        longitude: r.lon,
+        rating: 4.5,
+        types: ['landmark'],
+        source: 'wikipedia',
       }));
   } catch {
     return [];
   }
 }
 
-async function fetchGeoapifyPlaces(lat: string, lon: string, categories: string, limit: number) {
+async function fetchGeoapifyPlaces(type: string, lat: number, lng: number, limit: number) {
   if (!GEOAPIFY_KEY) return [];
+  const categories = GEOAPIFY_CATEGORY_MAP[type] || GEOAPIFY_CATEGORY_MAP.attractions;
   try {
-    const url = `https://api.geoapify.com/v2/places?categories=${categories}&filter=circle:${lon},${lat},10000&bias=proximity:${lon},${lat}&limit=${limit}&lang=zh&apiKey=${GEOAPIFY_KEY}`;
+    const url = `https://api.geoapify.com/v2/places?categories=${categories}&filter=circle:${lng},${lat},10000&bias=proximity:${lng},${lat}&limit=${limit}&lang=zh&apiKey=${GEOAPIFY_KEY}`;
     const res = await fetch(url, { signal: AbortSignal.timeout(5000) });
     if (!res.ok) return [];
     const data = await res.json();
@@ -92,63 +157,66 @@ async function fetchGeoapifyPlaces(lat: string, lon: string, categories: string,
         id: f.properties.place_id || `geo-${i}`,
         name: f.properties.name!,
         address: f.properties.formatted || '',
-        categories: f.properties.categories || [],
-        website: f.properties.website,
-        openingHours: f.properties.opening_hours,
+        latitude: f.properties.lat || lat,
+        longitude: f.properties.lon || lng,
+        types: f.properties.categories || [],
+        source: 'geoapify',
       }));
   } catch {
     return [];
   }
 }
 
+function isChinaDestination(destination: string, lat: number, lng: number): boolean {
+  if (lat >= 18 && lat <= 54 && lng >= 73 && lng <= 135) return true;
+  const cnKeywords = /中国|北京|上海|广州|深圳|成都|重庆|杭州|南京|西安|丽江|大理|香格里拉|云南|三亚|厦门|桂林|苏州|黄山|九寨沟|拉萨|青岛|武汉|长沙|哈尔滨/;
+  return cnKeywords.test(destination);
+}
+
 export async function GET(request: NextRequest) {
   const { searchParams } = request.nextUrl;
+  const destination = searchParams.get('destination') || '';
   const lat = searchParams.get('lat');
-  const lon = searchParams.get('lon');
-  const category = searchParams.get('category') || 'attractions';
-  const limit = parseInt(searchParams.get('limit') || '10', 10);
+  const lng = searchParams.get('lng') || searchParams.get('lon');
+  const type = searchParams.get('type') || searchParams.get('category') || 'attractions';
+  const limit = parseInt(searchParams.get('limit') || '15', 10);
 
-  if (!lat || !lon) {
-    return NextResponse.json({ error: 'lat and lon required' }, { status: 400 });
+  if (!lat || !lng) {
+    return NextResponse.json({ error: 'lat and lng required' }, { status: 400 });
   }
 
-  const cacheKey = `places:${lat}:${lon}:${category}:${limit}`;
-  const cached = getCached<unknown[]>(cacheKey);
+  const latNum = parseFloat(lat);
+  const lngNum = parseFloat(lng);
+  const cacheKey = `places:${lat}:${lng}:${type}:${limit}`;
+  const cached = getCached(cacheKey);
   if (cached) {
     return NextResponse.json({ places: cached, source: 'cache' });
   }
 
-  const categories = CATEGORY_MAP[category] || CATEGORY_MAP.attractions;
+  const isChina = isChinaDestination(destination, latNum, lngNum);
 
-  // For attractions and photo spots: use Chinese Wikipedia geosearch as primary
-  // For food: use Geoapify only (Wikipedia doesn't have restaurant data)
-  let places: { id: string; name: string; address: string; categories: string[]; website?: string; openingHours?: string }[] = [];
+  let places: unknown[] = [];
+  let source = 'none';
 
-  if (category === 'food') {
-    places = await fetchGeoapifyPlaces(lat, lon, categories, limit);
-  } else {
-    // Fetch from both sources in parallel
-    const [wikiPlaces, geoPlaces] = await Promise.all([
-      fetchWikipediaPlaces(lat, lon, limit),
-      fetchGeoapifyPlaces(lat, lon, categories, Math.ceil(limit / 2)),
-    ]);
+  if (isChina && AMAP_KEY) {
+    // Chinese destination: use Amap
+    const typeKeyword = type === 'food' ? '美食' : type === 'photo' ? '景点' : '景点';
+    places = await fetchAmapPlaces(typeKeyword, destination, type, limit);
+    if (places.length > 0) source = 'amap';
+  }
 
-    // Merge: Wikipedia results first (Chinese names), then Geoapify for extras
-    const seenNames = new Set<string>();
-    for (const p of wikiPlaces) {
-      if (!seenNames.has(p.name)) {
-        places.push(p);
-        seenNames.add(p.name);
-      }
-    }
-    for (const p of geoPlaces) {
-      if (!seenNames.has(p.name) && places.length < limit) {
-        places.push(p);
-        seenNames.add(p.name);
-      }
-    }
+  if (places.length === 0 && (type === 'attractions' || type === 'photo')) {
+    // International or Amap empty: use Wikipedia
+    places = await fetchWikipediaPlaces(latNum, lngNum, limit);
+    if (places.length > 0) source = 'wikipedia';
+  }
+
+  if (places.length === 0 && GEOAPIFY_KEY) {
+    // Fallback: Geoapify
+    places = await fetchGeoapifyPlaces(type, latNum, lngNum, limit);
+    if (places.length > 0) source = 'geoapify';
   }
 
   setCache(cacheKey, places);
-  return NextResponse.json({ places, source: 'wikipedia+geoapify' });
+  return NextResponse.json({ places, source });
 }
